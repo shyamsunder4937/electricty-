@@ -1,0 +1,17 @@
+flask
+flask-cors
+tensorflow
+numpy
+pandas
+scikit-learn
+joblib
+langchain>=0.1.0
+langchain-community>=0.0.20
+langchain-text-splitters>=0.0.1
+pypdf
+PyMuPDF
+Pillow
+faiss-cpu
+sentence-transformers
+huggingface-hub
+transformers

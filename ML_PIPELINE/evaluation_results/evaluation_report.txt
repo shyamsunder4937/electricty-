@@ -1,0 +1,63 @@
+
+======================================================================
+                    LSTM MODEL EVALUATION REPORT
+======================================================================
+
+Model Information:
+-----------------
+Model Type:              LSTM (Long Short-Term Memory)
+Window Size:             60 time steps
+Input Features:          4 (kWh, Voltage, Current, Frequency)
+Output:                  Energy Consumption (kWh)
+Training Samples:        89,946
+Test Samples:            9,994
+
+Training Set Performance:
+-------------------------
+Mean Absolute Error (MAE):          0.0122 kWh
+Root Mean Squared Error (RMSE):     0.0205 kWh
+R² Score:                           0.0378
+Mean Absolute Percentage Error:     2194322953.74%
+
+Test Set Performance:
+---------------------
+Mean Absolute Error (MAE):          0.0124 kWh
+Root Mean Squared Error (RMSE):     0.0201 kWh
+R² Score:                           0.0061
+Mean Absolute Percentage Error:     2939749704.79%
+
+Model Interpretation:
+--------------------
+• R² Score: 0.61% of the variance in energy consumption is explained by the model
+• On average, predictions are off by 0.0124 kWh (MAE)
+• The model shows good generalization
+  (R² difference: 0.0317)
+
+Residual Statistics:
+-------------------
+Training Residuals:
+  - Mean:                           0.000211 kWh
+  - Std Dev:                        0.0205 kWh
+  - Min:                            -0.0245 kWh
+  - Max:                            0.2158 kWh
+
+Test Residuals:
+  - Mean:                           -0.000321 kWh
+  - Std Dev:                        0.0201 kWh
+  - Min:                            -0.0196 kWh
+  - Max:                            0.1634 kWh
+
+Generated Visualizations:
+------------------------
+1. actual_vs_predicted.png       - Scatter plots comparing predictions to actual values
+2. time_series_comparison.png    - Sequential comparison of predictions over time
+3. residual_analysis.png         - Residual plots and distributions
+4. error_distribution.png        - Histogram of prediction errors
+5. metrics_comparison.png        - Bar chart comparing train vs test metrics
+6. accuracy_by_range.png         - Prediction accuracy across consumption ranges
+
+All visualizations saved to: D:\COLLAGE\DESIGN PROJECT\AI DYNAMIC PRICE\ML_PIPELINE\evaluation_results
+
+======================================================================
+                         END OF REPORT
+======================================================================
