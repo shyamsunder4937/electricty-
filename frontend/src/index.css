@@ -1,16 +1,44 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 @import "tailwindcss";
 
-@keyframes fade-in {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
+/* 
+   Tailwind CSS is now handling all the styling.
+   We only keep base directive and font imports here.
+   Custom animations can be added here if not using Tailwind config.
+*/
+
+@theme {
+  --animate-fade-in: fade-in 0.3s ease-out;
+  --animate-pulse-glow: pulse-glow 2s ease-in-out infinite;
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
-  to {
-    opacity: 1;
-    transform: translateY(0);
+
+  @keyframes pulse-glow {
+
+    0%,
+    100% {
+      box-shadow: 0 0 20px rgba(139, 92, 246, 0.4);
+    }
+
+    50% {
+      box-shadow: 0 0 30px rgba(139, 92, 246, 0.6);
+    }
   }
 }
 
-.animate-fade-in {
-  animation: fade-in 0.3s ease-out;
+/* Global resets and base styles provided by Tailwind @import "tailwindcss" */
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }

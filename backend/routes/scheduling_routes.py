@@ -206,7 +206,7 @@ def schedule_appliances():
             }
         
         # Helper function to generate user comfort suggestions
-        def get_comfort_suggestions(name, wattage, start_time, duration, current_status):
+        def get_comfort_suggestions(name, wattage, start_time, duration, current_status, current_cost):
             """Generate comfort-preserving cost-saving suggestions"""
             suggestions = []
             
@@ -242,12 +242,23 @@ def schedule_appliances():
             
             # AC suggestions
             elif "ac" in name_lower or "air conditioner" in name_lower or "conditioner" in name_lower:
+                # Specific 24°C recommendation with calculated savings
+                savings_24c = current_cost * 0.24  # approx 24% saving moving from 20°C to 24°C (6% per degree)
+                suggestions.append({
+                    "type": "temperature_optimization",
+                    "suggestion": "Set AC temperature to 24°C (optimal comfort)",
+                    "comfort_impact": "optimal",
+                    "potential_savings": f"₹{savings_24c:.2f} (approx 24%)",
+                    "reason": "24°C is the standard efficient temperature. Every degree lower increases consumption by ~6%."
+                })
+
                 if current_status == "PEAK":
+                    savings_temp = current_cost * 0.15
                     suggestions.append({
                         "type": "temperature_optimization",
-                        "suggestion": "Set AC temperature 1-2°C higher (e.g., 25°C instead of 23°C)",
+                        "suggestion": "Increase temperature by 1-2°C during peak hours",
                         "comfort_impact": "minimal",
-                        "potential_savings": "15-20% on electricity",
+                        "potential_savings": f"₹{savings_temp:.2f} (15-20%)",
                         "reason": "Small temperature increase significantly reduces power consumption"
                     })
                     
@@ -374,7 +385,7 @@ def schedule_appliances():
                 current_status = "MODERATE"
             
             # Get comfort suggestions
-            comfort_suggestions = get_comfort_suggestions(name, wattage, start_time, duration, current_status)
+            comfort_suggestions = get_comfort_suggestions(name, wattage, start_time, duration, current_status, current_cost)
             
             appliance_result = {
                 "appliance_name": name,
