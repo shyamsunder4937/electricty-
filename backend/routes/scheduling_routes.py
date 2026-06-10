@@ -159,7 +159,8 @@ def schedule_appliances():
         data = request.json
         room_name = data.get("room_name", "Room")
         appliances = data.get("appliances", [])
-        include_explanations = data.get("include_explanations", True)
+        # SPEED OPTIMIZATION: Default to False to skip slow RAG loading
+        include_explanations = data.get("include_explanations", False)
         show_detailed_hours = data.get("show_detailed_hours", False)
         
         if not appliances:
@@ -168,9 +169,59 @@ def schedule_appliances():
                 "message": "Please provide at least one appliance"
             }), 400
         
+        # Helper function to get comfort score for appliance at specific time
+        def get_comfort_score(appliance_name, hour):
+            """Rate comfort/practicality of using appliance at this hour (1-10)"""
+            name_lower = appliance_name.lower()
+            
+            if "heater" in name_lower or "geyser" in name_lower:
+                # Heater: Best in morning (6-9) and evening (6-10 PM)
+                if 6 <= hour <= 9 or 18 <= hour <= 22:
+                    return 10  # Perfect time
+                elif 5 <= hour <= 10 or 17 <= hour <= 23:
+                    return 8  # Good time
+                elif 23 <= hour or hour <= 5:
+                    return 3  # Night - impractical
+                else:
+                    return 5  # Mid-day - uncomfortable
+            
+            elif "ac" in name_lower:
+                # AC: Best in afternoon/evening (12 PM - 11 PM)
+                if 14 <= hour <= 23:
+                    return 10  # Perfect time
+                elif 12 <= hour <= 14 or hour == 0:
+                    return 7  # Okay time
+                else:
+                    return 3  # Morning/night - impractical
+            
+            elif "washing" in name_lower:
+                # Washing machine: Flexible, but not late night
+                if 7 <= hour <= 22:
+                    return 10  # Anytime during day
+                elif 22 <= hour <= 24 or 6 <= hour <= 7:
+                    return 7  # Early morning/late evening okay
+                else:
+                    return 4  # Middle of night - impractical
+            
+            else:
+                # Other appliances: generally flexible
+                if 6 <= hour <= 23:
+                    return 9
+                else:
+                    return 5
+        
         # Helper function to detect rebound peak
         def detect_rebound_peak(hour, wattage, duration):
-            """Check if a time slot can cause rebound peak"""
+            """Check if a time slot can cause rebound peak - IMPROVED DETECTION
+            
+            With the new granular hourly base load model:
+            - Off-peak hours: 0-5 (base 0.14-0.22)
+            - Moderate hours: 10-16, 23 (base 0.35-0.58)
+            - Peak hours: 6-9, 17-22 (base 0.55-0.85)
+            
+            Rebound peak scenarios detect when many users shift to the SAME 
+            off-peak/moderate slot, creating artificial demand spikes.
+            """
             # Get predictions for the hour and surrounding hours
             current_pred = get_lstm_peak_prediction(hour, wattage, duration)
             
@@ -183,120 +234,208 @@ def schedule_appliances():
             
             is_rebound = False
             rebound_reason = None
+            risk_level = "LOW"
             
-            # Rebound peak occurs when off-peak shifts to moderate/peak due to demand surge
-            if current_pred["load_category"] == "off-peak":
-                # If many appliances scheduled, could push to moderate/peak
-                if wattage >= 1500:  # High-wattage appliance
-                    is_rebound = True
-                    rebound_reason = f"High-wattage appliance ({wattage}W) during off-peak could create demand surge, potentially shifting to moderate load"
-            
-            # Check if transitioning from off-peak to peak (typical rebound scenario)
-            if (pred_before["load_category"] == "off-peak" and 
-                current_pred["load_category"] in ["moderate", "peak"]):
+            # REBOUND PEAK SCENARIO 1: Off-peak time with high-wattage appliance
+            # This is the MAIN rebound peak scenario - many users shift to "off-peak" creating new peak
+            if current_pred["load_category"] == "off-peak" and wattage >= 1000:
                 is_rebound = True
-                rebound_reason = f"Transitioning from off-peak ({hour_before}:00) to {current_pred['load_category']} ({hour}:00) - typical rebound peak pattern"
+                risk_level = "HIGH" if wattage >= 2000 else "MEDIUM"
+                
+                # Explain based on time and comfort
+                comfort = get_comfort_score(name, hour)
+                if comfort <= 5:
+                    rebound_reason = f"⚠️ UNCOMFORTABLE TIME: Almost nobody uses {name} at {hour}:00 (comfort: {comfort}/100). Users may override this schedule and actually run the appliance during natural peak hours instead."
+                elif 22 <= hour or hour <= 5:  # Night
+                    rebound_reason = f"⚠️ UNCOMFORTABLE TIME: Using {name} at {hour}:00 is impractical for most users. Many will ignore this schedule and use during peak hours, defeating the purpose."
+                else:
+                    rebound_reason = f"⚠️ REBOUND RISK: Many users scheduling {wattage}W appliances at {hour}:00 (thinking it's off-peak) creates collective demand surge."
+            
+            # REBOUND PEAK SCENARIO 2: Transition from off-peak to moderate/peak
+            # e.g., 5:00 (off-peak) → 6:00 (moderate/peak) — appliances clustered at transition boundary
+            elif (pred_before["load_category"] == "off-peak" and 
+                  current_pred["load_category"] in ["moderate", "peak"]):
+                is_rebound = True
+                risk_level = "MEDIUM"
+                rebound_reason = f"⚠️ DEMAND SURGE: Transitioning from off-peak ({hour_before}:00) to {current_pred['load_category']} ({hour}:00). Many appliances starting simultaneously at the off-peak boundary."
+            
+            # REBOUND PEAK SCENARIO 3: Moderate-hour clustering for high-watt appliances
+            # AI commonly recommends moderate hours (10-16) for cost savings, causing clustering
+            elif current_pred["load_category"] == "moderate" and wattage >= 1000:
+                # These are commonly AI-recommended "cheap" hours
+                if hour in [10, 11, 12, 13, 14, 15, 16, 23]:
+                    is_rebound = True
+                    risk_level = "MEDIUM"
+                    rebound_reason = f"⚠️ CLUSTERING RISK: {hour}:00 is commonly recommended as 'off-peak/moderate', causing many users to cluster {wattage}W appliances here, creating a moderate demand spike."
             
             return {
                 "is_rebound_peak": is_rebound,
                 "rebound_reason": rebound_reason,
+                "risk_level": risk_level,
                 "hour_before_load": pred_before["load_category"],
                 "current_load": current_pred["load_category"],
-                "hour_after_load": pred_after["load_category"]
+                "hour_after_load": pred_after["load_category"],
+                "comfort_score": get_comfort_score(name, hour)
             }
         
         # Helper function to generate user comfort suggestions
         def get_comfort_suggestions(name, wattage, start_time, duration, current_status, current_cost):
-            """Generate comfort-preserving cost-saving suggestions"""
+            """Generate comfort-preserving cost-saving suggestions with PRACTICAL explanations"""
             suggestions = []
             
             name_lower = name.lower()
             
-            # Heater suggestions
+            # Heater suggestions - PRACTICAL AND CONTEXT-AWARE
             if "heater" in name_lower or "geyser" in name_lower:
                 if current_status == "PEAK":
-                    # Suggest using before peak hours
-                    if start_time >= 6 and start_time < 10:  # Morning peak
+                    # Morning peak (7-9 AM)
+                    if start_time >= 7 and start_time <= 9:
                         suggestions.append({
                             "type": "time_shift",
-                            "suggestion": f"Use {name} at {start_time-2}:00 instead of {start_time}:00 to avoid morning peak",
-                            "comfort_impact": "minimal",
-                            "reason": "Pre-heating before peak hours maintains comfort while saving money"
+                            "suggestion": f"⚠️ PEAK ALERT: {start_time}:00 is morning rush hour when everyone uses heaters. Pre-heat at 6:00 AM (before peak) to save ₹{current_cost * 0.5:.2f}",
+                            "comfort_impact": "none",
+                            "reason": f"At {start_time}:00, thousands of homes turn on heaters simultaneously, causing peak demand. Starting 1 hour earlier avoids this surge while your room stays warm.",
+                            "practical_tip": "Set a timer to start heating at 6 AM. Room will be warm by the time you wake up, and you save 50% on costs."
                         })
-                    elif start_time >= 18 and start_time < 22:  # Evening peak
+                    # Evening peak (6-10 PM)
+                    elif start_time >= 18 and start_time <= 22:
                         suggestions.append({
                             "type": "time_shift",
-                            "suggestion": f"Start {name} at {start_time-1}:00 (before peak) or wait until 22:00 (after peak)",
+                            "suggestion": f"⚠️ PEAK ALERT: {start_time}:00 is evening rush hour. Heat at 5:00 PM (before peak) or 11:00 PM (after peak) to save ₹{current_cost * 0.5:.2f}",
+                            "comfort_impact": "minimal",
+                            "reason": f"At {start_time}:00, everyone returns home and turns on heaters, creating peak demand. Pre-heating or late heating avoids high costs.",
+                            "practical_tip": "Pre-heat at 5 PM so room is warm when you arrive, or use at 11 PM if you can wait."
+                        })
+                    else:
+                        suggestions.append({
+                            "type": "time_shift",
+                            "suggestion": f"Shift heater to late night (11 PM-5 AM) when rates are lowest (₹5/kWh vs ₹{current_cost/duration:.0f}/kWh now)",
                             "comfort_impact": "low",
-                            "reason": "Room will stay warm, and you save on peak charges"
+                            "reason": "Very few people use heaters at night, so electricity is cheapest. Room retains heat for hours.",
+                            "practical_tip": "Heat room before sleeping. Well-insulated rooms stay warm for 3-4 hours."
                         })
                 
-                # Suggest optimal duration
+                # Duration optimization
                 if duration > 2:
                     suggestions.append({
                         "type": "duration_optimization",
-                        "suggestion": f"Reduce heating duration from {duration}h to {duration-0.5}h",
+                        "suggestion": f"Reduce heating from {duration}h to {duration-1}h. Room retains heat, you save ₹{(current_cost/duration):.2f}",
                         "comfort_impact": "minimal",
-                        "reason": "Room retains heat; slight reduction won't affect comfort significantly"
+                        "reason": "Rooms stay warm for 1-2 hours after heater is off. No need to run continuously.",
+                        "practical_tip": "Heat for 1-2 hours, then turn off. Use blankets to maintain warmth."
                     })
+                
+                # Reduce other loads
+                suggestions.append({
+                    "type": "load_management",
+                    "suggestion": f"While using heater at {start_time}:00, turn off AC, geyser, or other high-load appliances",
+                    "comfort_impact": "none",
+                    "reason": f"Running multiple high-power appliances together increases your load category from moderate to peak, raising costs by 30-40%.",
+                    "practical_tip": "Use only one high-power appliance at a time. Stagger usage by 1-2 hours."
+                })
             
-            # AC suggestions
+            # AC suggestions - PRACTICAL
             elif "ac" in name_lower or "air conditioner" in name_lower or "conditioner" in name_lower:
-                # Specific 24°C recommendation with calculated savings
-                savings_24c = current_cost * 0.24  # approx 24% saving moving from 20°C to 24°C (6% per degree)
+                # Specific 24°C recommendation
+                savings_24c = current_cost * 0.24
                 suggestions.append({
                     "type": "temperature_optimization",
-                    "suggestion": "Set AC temperature to 24°C (optimal comfort)",
+                    "suggestion": f"Set AC to 24°C (currently optimal). Each degree lower costs ₹{current_cost * 0.06:.2f} more",
                     "comfort_impact": "optimal",
-                    "potential_savings": f"₹{savings_24c:.2f} (approx 24%)",
-                    "reason": "24°C is the standard efficient temperature. Every degree lower increases consumption by ~6%."
+                    "potential_savings": f"₹{savings_24c:.2f} if you're using 20°C now",
+                    "reason": "24°C is the BEE (Bureau of Energy Efficiency) recommended temperature. It's comfortable and efficient.",
+                    "practical_tip": "Use ceiling fan with AC at 24°C. Feels like 22°C but uses 25% less power."
                 })
 
                 if current_status == "PEAK":
-                    savings_temp = current_cost * 0.15
-                    suggestions.append({
-                        "type": "temperature_optimization",
-                        "suggestion": "Increase temperature by 1-2°C during peak hours",
-                        "comfort_impact": "minimal",
-                        "potential_savings": f"₹{savings_temp:.2f} (15-20%)",
-                        "reason": "Small temperature increase significantly reduces power consumption"
-                    })
-                    
-                if start_time >= 18:  # Evening use
-                    suggestions.append({
-                        "type": "time_shift",
-                        "suggestion": f"Start AC at {start_time-1}:00 to pre-cool the room before peak hours",
-                        "comfort_impact": "none",
-                        "reason": "Pre-cooled room maintains temperature during peak hours"
-                    })
+                    if start_time >= 18 and start_time <= 22:
+                        suggestions.append({
+                            "type": "time_shift",
+                            "suggestion": f"⚠️ PEAK ALERT: {start_time}:00 is evening rush (everyone uses AC). Pre-cool at 5:00 PM to save ₹{current_cost * 0.5:.2f}",
+                            "comfort_impact": "none",
+                            "reason": f"At {start_time}:00, peak demand drives rates to ₹10/kWh. Pre-cooling at 5 PM costs only ₹7/kWh.",
+                            "practical_tip": "Cool room before peak hours. Close doors/windows to retain coolness."
+                        })
+                    else:
+                        suggestions.append({
+                            "type": "time_shift",
+                            "suggestion": f"Shift AC to late night (11 PM-6 AM) when rates drop to ₹5/kWh (save ₹{current_cost * 0.5:.2f})",
+                            "comfort_impact": "depends on schedule",
+                            "reason": "Night hours have lowest demand and cheapest rates. Perfect for bedroom cooling.",
+                            "practical_tip": "Use AC timer to start at 11 PM. Room stays cool through the night."
+                        })
                 
-                # Suggest usage during lower peak with comfort
+                # Reduce other loads
                 suggestions.append({
-                    "type": "smart_usage",
-                    "suggestion": "Use ceiling fan along with AC to maintain comfort at higher temperature setting",
+                    "type": "load_management",
+                    "suggestion": f"Turn off geyser, heater, or washing machine while AC is running",
                     "comfort_impact": "none",
-                    "potential_savings": "20-30% on electricity",
-                    "reason": "Air circulation makes room feel cooler without extra AC load"
+                    "potential_savings": "₹50-100/month",
+                    "reason": "Running AC with other high-power appliances pushes you into peak pricing tier.",
+                    "practical_tip": "Heat water before using AC, or use washing machine after AC is off."
                 })
             
-            # Washing Machine suggestions
+            # Washing Machine - PRACTICAL
             elif "washing" in name_lower or "washer" in name_lower:
-                if current_status == "PEAK" or current_status == "MODERATE":
+                # PRIORITY 1: If user chose a reasonable time (not peak), give load management tips
+                if current_status != "PEAK":
+                    suggestions.append({
+                        "type": "load_management",
+                        "suggestion": f"✅ Good time choice! To maximize savings: Turn off AC, heater, or geyser while washing machine runs",
+                        "comfort_impact": "none",
+                        "potential_savings": "₹20-40/cycle",
+                        "reason": f"At {start_time}:00, you're paying ₹{current_pricing['price']}/kWh. Running multiple high-power appliances together pushes you into peak pricing.",
+                        "practical_tip": "Use washing machine alone. Heat water before or after washing cycle."
+                    })
+                    
+                    suggestions.append({
+                        "type": "usage_optimization",
+                        "suggestion": "Run full loads only. Half loads waste 50% of electricity per kg of clothes",
+                        "comfort_impact": "none",
+                        "potential_savings": "₹30-50/month",
+                        "reason": "Washing machine uses same power for half load or full load. Maximize efficiency.",
+                        "practical_tip": "Collect clothes for 2-3 days, then wash full load."
+                    })
+                
+                # PRIORITY 2: Only suggest time shift if it's PEAK hour
+                if current_status == "PEAK":
                     suggestions.append({
                         "type": "time_shift",
-                        "suggestion": f"Schedule {name} during off-peak hours (11 PM - 6 AM)",
+                        "suggestion": f"⚠️ PEAK HOUR: {start_time}:00 costs ₹{current_pricing['price']}/kWh. Shift to 2:00 PM or 10:00 PM to save ₹{current_cost * 0.5:.2f}",
+                        "comfort_impact": "minimal",
+                        "reason": f"At {start_time}:00, peak demand drives rates high. Mid-afternoon (2-4 PM) or late evening (10-11 PM) are cheaper.",
+                        "practical_tip": "Use delayed start feature. Load now, set to start at 2 PM or 10 PM."
+                    })
+                else:
+                    # If off-peak/moderate, emphasize load management over time shift
+                    suggestions.append({
+                        "type": "duration_optimization",
+                        "suggestion": f"Use quick wash cycle (30-45 min) instead of full cycle to reduce runtime by 50%",
                         "comfort_impact": "none",
-                        "reason": "Delayed start won't affect your comfort; save significantly on electricity"
+                        "potential_savings": f"₹{current_cost * 0.3:.2f} per wash",
+                        "reason": "Quick wash uses less water heating time, cutting energy consumption significantly.",
+                        "practical_tip": "Quick wash works well for lightly soiled clothes. Save full cycles for heavily soiled items."
                     })
             
-            # Geyser/Water Heater specific
+            # Geyser/Water Heater - PRACTICAL
             elif "geyser" in name_lower or "water heater" in name_lower:
+                if current_status == "PEAK":
+                    if start_time >= 6 and start_time <= 9:
+                        suggestions.append({
+                            "type": "time_shift",
+                            "suggestion": f"⚠️ MORNING PEAK: Everyone heats water at {start_time}:00. Heat at 5:30 AM (before peak) to save ₹{current_cost * 0.5:.2f}",
+                            "comfort_impact": "none",
+                            "reason": f"At {start_time}:00, peak demand costs ₹10/kWh. Just 30 minutes earlier costs ₹5/kWh.",
+                            "practical_tip": "Set timer for 5:30 AM. Water stays hot for 2-3 hours in insulated tank."
+                        })
+                
                 suggestions.append({
                     "type": "usage_optimization",
-                    "suggestion": "Heat water during off-peak hours and use insulated storage",
+                    "suggestion": "Heat water at night (11 PM), use in morning. Insulated geysers retain heat for 8-10 hours",
                     "comfort_impact": "none",
-                    "potential_savings": "30-40%",
-                    "reason": "Hot water stays warm for hours; no comfort compromise"
+                    "potential_savings": f"₹{current_cost * 0.5:.2f} per use",
+                    "reason": "Night electricity is 50% cheaper. Modern geysers keep water hot overnight.",
+                    "practical_tip": "Heat at 11 PM, use at 7 AM. Add insulation blanket to geyser for better retention."
                 })
             
             return suggestions
@@ -338,7 +477,27 @@ def schedule_appliances():
             # Find best time and alternative times
             best_time_slot = None
             min_cost = float('inf')
-            alternative_times = []  # Store top 3 alternatives near user's preferred time
+            alternative_times = []  # Store comfort-friendly alternatives NEAR user's time
+            
+            # Define practical hours for different appliances
+            if "heater" in name.lower() or "geyser" in name.lower():
+                # Heater: practical times are 5-10 AM, 5-11 PM
+                practical_hours = list(range(5, 11)) + list(range(17, 24))
+            elif "ac" in name.lower() or "air" in name.lower():
+                # AC: practical times are 10 AM - 11 PM
+                practical_hours = list(range(10, 24))
+            elif "washing" in name.lower():
+                # Washing machine: practical daytime hours 7 AM - 10 PM
+                practical_hours = list(range(7, 23))
+            else:
+                # Other appliances: daytime hours preferred
+                practical_hours = list(range(6, 23))
+            
+            # PRIORITIZE: Find best time within PRACTICAL hours first
+            best_practical_time = None
+            min_practical_cost = float('inf')
+            absolute_best_slot = None
+            absolute_min_cost = float('inf')
             
             for hour in range(24):
                 prediction = get_lstm_peak_prediction(hour, wattage, duration)
@@ -356,25 +515,75 @@ def schedule_appliances():
                     "load_category": prediction["load_category"],
                     "price_per_kwh": float(pricing["price"]),
                     "total_cost": float(cost),
-                    "is_peak": bool(pricing["peak"])
+                    "is_peak": bool(pricing["peak"]),
+                    "predicted_load": float(prediction["predicted_load"])
                 }
                 
-                # Track best time
+                # Track absolute best time (any hour, for reference)
+                if cost < absolute_min_cost:
+                    absolute_min_cost = cost
+                    absolute_best_slot = time_slot.copy()
+                
+                # Track absolute best for best_time_slot too (default)
                 if cost < min_cost:
                     min_cost = cost
                     best_time_slot = time_slot
                 
-                # Track alternatives near user's time (within 3 hours before/after)
+                # Track best PRACTICAL time (prioritize this!)
+                if hour in practical_hours and cost < min_practical_cost:
+                    min_practical_cost = cost
+                    best_practical_time = time_slot
+                
+                # Track alternatives NEAR user's time (within 4 hours) AND practical
                 hour_diff = abs(hour - start_time)
-                if hour_diff <= 3 and hour != start_time and not pricing["peak"]:
+                # Handle wrap-around (e.g., 23:00 to 01:00 is 2 hours, not 22)
+                if hour_diff > 12:
+                    hour_diff = 24 - hour_diff
+                
+                # Only include if: nearby, practical, not current time, and not peak
+                if (hour_diff <= 4 and 
+                    hour != start_time and 
+                    not pricing["peak"] and
+                    hour in practical_hours):
                     time_slot["time_difference"] = hour - start_time
+                    time_slot["is_practical"] = True
                     alternative_times.append(time_slot)
+            
+            # USE PRACTICAL BEST TIME if available, otherwise fall back to absolute best
+            if best_practical_time and best_practical_time["hour"] in practical_hours:
+                best_time_slot = best_practical_time
+                min_cost = min_practical_cost
+            
+            # If no practical alternatives found nearby, add some practical off-peak times
+            if len(alternative_times) == 0:
+                for hour in practical_hours:
+                    prediction = get_lstm_peak_prediction(hour, wattage, duration)
+                    pricing = pricing_rule(
+                        prediction["predicted_load"],
+                        hour,
+                        prediction["is_peak_by_lstm"],
+                        prediction["load_category"]
+                    )
+                    if not pricing["peak"]:
+                        cost = energy_kwh * pricing["price"]
+                        alternative_times.append({
+                            "hour": hour,
+                            "load_category": prediction["load_category"],
+                            "price_per_kwh": float(pricing["price"]),
+                            "total_cost": float(cost),
+                            "is_peak": False,
+                            "time_difference": hour - start_time,
+                            "is_practical": True,
+                            "predicted_load": float(prediction["predicted_load"])
+                        })
+                        if len(alternative_times) >= 5:
+                            break
             
             total_best_cost += min_cost
             
-            # Sort alternatives by cost and proximity
+            # Sort alternatives by cost first, then proximity
             alternative_times.sort(key=lambda x: (x["total_cost"], abs(x["time_difference"])))
-            alternative_times = alternative_times[:3]  # Keep top 3
+            alternative_times = alternative_times[:5]  # Keep top 5
             
             # Calculate savings
             cost_reduction = current_cost - min_cost
@@ -386,6 +595,133 @@ def schedule_appliances():
             
             # Get comfort suggestions
             comfort_suggestions = get_comfort_suggestions(name, wattage, start_time, duration, current_status, current_cost)
+            
+            # ALWAYS include basic rebound peak info (even without explanations)
+            basic_rebound_analysis = None
+            if rebound_info["is_rebound_peak"]:
+                # Find practical alternative times for this appliance
+                # These should be comfort-appropriate times with naturally expected grid usage
+                practical_alternatives = []
+                if "heater" in name.lower() or "geyser" in name.lower() or "water" in name.lower():
+                    practical_alternatives = [8, 22, 19]  # Morning peak (natural), late evening, evening
+                elif "washing" in name.lower():
+                    practical_alternatives = [17, 13]  # Late afternoon, early afternoon  
+                elif "ac" in name.lower():
+                    practical_alternatives = [13, 23]  # Early afternoon (moderate), late night
+                else:
+                    practical_alternatives = [13, 17, 22]  # General alternatives
+                
+                # Format alternatives as readable times
+                alt_times_str = ", ".join([f"{h}:00" for h in practical_alternatives[:3]])
+                
+                # Calculate load reduction if duration is reduced
+                reduced_duration = max(0.5, duration * 0.5)  # 50% reduction
+                load_reduction_kw = (wattage * (duration - reduced_duration)) / 1000
+                
+                # Build comprehensive rebound analysis
+                basic_rebound_analysis = {
+                    "is_rebound_peak": True,
+                    "severity": rebound_info.get("risk_level", "MEDIUM"),
+                    "risk_level": rebound_info.get("risk_level", "MEDIUM"),
+                    
+                    # Main alert message
+                    "alert_message": rebound_info["rebound_reason"],
+                    
+                    # Load pattern visualization
+                    "load_pattern": {
+                        "hour_before": {
+                            "time": f"{(start_time-1)%24}:00",
+                            "load_category": rebound_info['hour_before_load']
+                        },
+                        "your_time": {
+                            "time": f"{start_time}:00",
+                            "load_category": rebound_info['current_load']
+                        },
+                        "hour_after": {
+                            "time": f"{(start_time+1)%24}:00",
+                            "load_category": rebound_info['hour_after_load']
+                        }
+                    },
+                    
+                    # Why rebound peak occurs
+                    "why_rebound_peak_occurs": "Rebound peak occurs when many users shift electricity usage to off-peak hours, creating a new demand spike.",
+                    
+                    # How to avoid rebound peak - PRIORITIZE LOAD MANAGEMENT
+                    "how_to_avoid": [
+                        f"Stagger usage — schedule at a different off-peak hour (e.g., {practical_alternatives[0]}:00 or {practical_alternatives[1]}:00) to spread grid load",
+                        f"Choose comfort-friendly alternatives: peak usage hours for {name} are [{', '.join(str(h) for h in practical_alternatives)}], which are naturally expected by the grid",
+                        "Reduce runtime duration to minimise per-hour load contribution",
+                        f"Use split-usage strategy: run 40% now for immediate need, 60% at a non-clustered off-peak hour",
+                        f"⚡ TURN OFF other heavy appliances (AC, heater, geyser) during {start_time}:00-{(start_time+int(duration))%24}:00 to compensate for your {wattage}W load"
+                    ],
+                    
+                    # Load reduction action plan
+                    "load_reduction_plan": {
+                        "context": f"You are the only scheduled appliance at {start_time}:00. The rebound risk comes from many OTHER households running their {name} at the same AI-recommended off-peak slot. To reduce collective grid impact:",
+                        "actions": [
+                            {
+                                "appliance": name,
+                                "action": "shift_time",
+                                "suggestion": f"Move to {practical_alternatives[0]}:00 or {practical_alternatives[1]}:00 — spreading load across different hours avoids a cluster spike.",
+                                "impact": f"{wattage}W removed from {start_time}:00",
+                                "badge": "Shift time"
+                            },
+                            {
+                                "appliance": name,
+                                "action": "reduce_duration",
+                                "suggestion": f"Run for {reduced_duration}h instead of {duration}h to halve your contribution.",
+                                "impact": f"~{load_reduction_kw:.1f}kW equivalent reduction",
+                                "badge": "Reduce duration"
+                            }
+                        ],
+                        "total_reduction": f"Reduces {start_time}:00 artificial spike by {load_reduction_kw:.1f} kW"
+                    }
+                }
+            
+            # Generate best time recommendation with reason
+            best_hour = best_time_slot["hour"]
+            if best_time_slot["load_category"] == "off-peak":
+                if 0 <= best_hour <= 5:
+                    best_reason = f"{best_hour}:00 is deep off-peak (night hours) when grid demand is at its lowest — very few households are consuming electricity, so rates drop to Rs.{best_time_slot['price_per_kwh']:.0f}/kWh."
+                else:
+                    best_reason = f"{best_hour}:00 is off-peak with minimal grid demand, making it the cheapest slot at Rs.{best_time_slot['price_per_kwh']:.0f}/kWh."
+            elif best_time_slot["load_category"] == "moderate":
+                if 10 <= best_hour <= 16:
+                    best_reason = f"{best_hour}:00 is a moderate-demand period (mid-day) when most people are at work/school. Grid load is lower than peak hours, so rates are Rs.{best_time_slot['price_per_kwh']:.0f}/kWh instead of Rs.10/kWh."
+                elif best_hour == 23:
+                    best_reason = f"{best_hour}:00 is late evening with declining demand as households wind down, offering moderate rates of Rs.{best_time_slot['price_per_kwh']:.0f}/kWh."
+                else:
+                    best_reason = f"{best_hour}:00 has moderate grid load, offering a balance of comfort and cost at Rs.{best_time_slot['price_per_kwh']:.0f}/kWh."
+            else:
+                best_reason = f"{best_hour}:00 is the cheapest practical time at Rs.{best_time_slot['price_per_kwh']:.0f}/kWh."
+            
+            # If no savings, explain the user is already optimal
+            if cost_reduction == 0:
+                best_reason += f" Your chosen time ({start_time}:00) is already at the same rate — you're paying the optimal price for practical hours!"
+            
+            best_time_rec = {
+                "hour": best_time_slot["hour"],
+                "load_category": best_time_slot["load_category"],
+                "price_per_kwh": best_time_slot["price_per_kwh"],
+                "total_cost": best_time_slot["total_cost"],
+                "savings": float(cost_reduction),
+                "reason": best_reason
+            }
+            
+            # Include absolute cheapest time if it differs from practical best
+            if (absolute_best_slot and 
+                absolute_best_slot["hour"] != best_time_slot["hour"] and
+                absolute_min_cost < min_cost):
+                abs_hour = absolute_best_slot["hour"]
+                abs_savings = current_cost - absolute_min_cost
+                best_time_rec["absolute_best_time"] = {
+                    "hour": abs_hour,
+                    "load_category": absolute_best_slot["load_category"],
+                    "price_per_kwh": absolute_best_slot["price_per_kwh"],
+                    "total_cost": absolute_best_slot["total_cost"],
+                    "savings": float(abs_savings),
+                    "note": f"Cheapest at {abs_hour}:00 (Rs.{absolute_best_slot['price_per_kwh']:.0f}/kWh, save Rs.{abs_savings:.2f}) but may be less comfortable for {name}."
+                }
             
             appliance_result = {
                 "appliance_name": name,
@@ -403,23 +739,22 @@ def schedule_appliances():
                     "total_cost": float(current_cost),
                     "is_peak": bool(current_pricing["peak"]),
                     "is_rebound_peak": rebound_info["is_rebound_peak"],
-                    "rebound_explanation": rebound_info["rebound_reason"] if rebound_info["is_rebound_peak"] else None
+                    "rebound_risk_level": rebound_info.get("risk_level", "LOW"),
+                    "rebound_explanation": rebound_info["rebound_reason"] if rebound_info["is_rebound_peak"] else None,
+                    "comfort_score": rebound_info.get("comfort_score", 10)
                 },
                 
                 # Best time recommendation
-                "best_time_recommendation": {
-                    "hour": best_time_slot["hour"],
-                    "load_category": best_time_slot["load_category"],
-                    "price_per_kwh": best_time_slot["price_per_kwh"],
-                    "total_cost": best_time_slot["total_cost"],
-                    "savings": float(cost_reduction)
-                },
+                "best_time_recommendation": best_time_rec,
                 
                 # Alternative times close to user preference
                 "comfort_friendly_alternatives": alternative_times,
                 
                 # User comfort suggestions
                 "comfort_suggestions": comfort_suggestions,
+                
+                # Basic rebound peak analysis (always included)
+                "rebound_peak_analysis": basic_rebound_analysis,
                 
                 # Cost summary
                 "cost_summary": {
@@ -527,25 +862,67 @@ def schedule_appliances():
                         "supporting_images": rebound_images
                     }
                 
-                # Build simple summary
+                # Build simple summary with CLEAR EXPLANATIONS
                 summary_parts = []
                 
+                # Explain WHY it's peak/moderate/off-peak
                 if current_status == "PEAK":
-                    summary_parts.append(f"⚠️ **ALERT:** {name} at {start_time}:00 is during PEAK HOURS (₹{current_pricing['price']}/kWh)")
+                    if start_time >= 7 and start_time <= 9:
+                        peak_reason = f"Morning rush hour (7-9 AM): Everyone uses heaters, geysers, and appliances before work/school"
+                    elif start_time >= 18 and start_time <= 22:
+                        peak_reason = f"Evening rush hour (6-10 PM): Everyone returns home and uses AC, heaters, cooking appliances"
+                    else:
+                        peak_reason = f"High grid demand at this hour due to combined household usage"
+                    
+                    summary_parts.append(f"⚠️ **PEAK ALERT:** {name} at {start_time}:00 costs ₹{current_pricing['price']}/kWh")
+                    summary_parts.append(f"📊 **Why Peak?** {peak_reason}")
+                    summary_parts.append(f"⚡ **Your Load:** {current_prediction['predicted_load']:.2f} kWh (Base: {current_prediction.get('base_load', 0):.2f} + Your {name}: {current_prediction.get('appliance_contribution', 0):.2f})")
+                    
                     if rebound_info["is_rebound_peak"]:
-                        summary_parts.append(f"🔄 **REBOUND PEAK DETECTED:** This timing may cause demand surge")
+                        summary_parts.append(f"🔄 **REBOUND PEAK:** Many users shifted to this 'off-peak' time, creating new peak!")
+                
                 elif current_status == "MODERATE":
-                    summary_parts.append(f"🟡 {name} at {start_time}:00 is during MODERATE hours (₹{current_pricing['price']}/kWh)")
+                    if start_time >= 10 and start_time <= 17:
+                        moderate_reason = f"Mid-day hours: Moderate demand as most people are at work/school"
+                    else:
+                        moderate_reason = f"Transition period with moderate grid demand"
+                    
+                    summary_parts.append(f"🟡 **MODERATE:** {name} at {start_time}:00 costs ₹{current_pricing['price']}/kWh")
+                    summary_parts.append(f"📊 **Why Moderate?** {moderate_reason}")
+                    summary_parts.append(f"⚡ **Your Load:** {current_prediction['predicted_load']:.2f} kWh (Base: {current_prediction.get('base_load', 0):.2f} + Your {name}: {current_prediction.get('appliance_contribution', 0):.2f})")
                 else:
-                    summary_parts.append(f"✅ GOOD CHOICE: {name} at {start_time}:00 is during OFF-PEAK hours (₹{current_pricing['price']}/kWh)")
+                    if start_time >= 23 or start_time <= 6:
+                        offpeak_reason = f"Night hours (11 PM-6 AM): Very low demand as most people sleep"
+                    else:
+                        offpeak_reason = f"Low demand period - good time for high-power appliances"
+                    
+                    summary_parts.append(f"✅ **EXCELLENT CHOICE:** {name} at {start_time}:00 costs only ₹{current_pricing['price']}/kWh")
+                    summary_parts.append(f"📊 **Why Off-Peak?** {offpeak_reason}")
+                    summary_parts.append(f"⚡ **Your Load:** {current_prediction['predicted_load']:.2f} kWh (Base: {current_prediction.get('base_load', 0):.2f} + Your {name}: {current_prediction.get('appliance_contribution', 0):.2f})")
                 
+                # Show savings opportunity with PRACTICAL alternatives
                 if cost_reduction > 0:
-                    summary_parts.append(f"💰 **SAVE ₹{cost_reduction:.2f}:** Switch to {best_time_slot['hour']}:00 (₹{best_time_slot['total_cost']:.2f} instead of ₹{current_cost:.2f})")
+                    best_hour = best_time_slot['hour']
+                    
+                    # Give PRACTICAL explanation of best time
+                    if best_hour >= 23 or best_hour <= 6:
+                        best_time_reason = f"Late night/early morning (lowest demand, cheapest rates)"
+                    elif best_hour >= 10 and best_hour <= 16:
+                        best_time_reason = f"Mid-day (moderate demand, reasonable rates)"
+                    else:
+                        best_time_reason = f"Off-peak period"
+                    
+                    summary_parts.append(f"💰 **SAVE ₹{cost_reduction:.2f}:** Best time is {best_hour}:00 ({best_time_reason})")
+                    summary_parts.append(f"💡 **Cost Comparison:** ₹{current_cost:.2f} now vs ₹{best_time_slot['total_cost']:.2f} at {best_hour}:00")
                 else:
-                    summary_parts.append(f"✨ You're already using the optimal time!")
+                    summary_parts.append(f"✨ **OPTIMAL TIMING:** You're already using the cheapest time!")
                 
+                # Show TOP practical suggestion
                 if comfort_suggestions:
-                    summary_parts.append(f"🏠 **TOP TIP:** {comfort_suggestions[0]['suggestion']}")
+                    top_suggestion = comfort_suggestions[0]
+                    summary_parts.append(f"🏠 **ACTION:** {top_suggestion['suggestion']}")
+                    if 'practical_tip' in top_suggestion:
+                        summary_parts.append(f"💡 **Tip:** {top_suggestion['practical_tip']}")
                 
                 clear_explanation["simple_summary"] = "\n".join(summary_parts)
                 

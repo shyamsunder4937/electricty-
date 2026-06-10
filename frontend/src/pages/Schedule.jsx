@@ -259,7 +259,7 @@ function ApplianceCard({ app, index }) {
     const savings = app.cost_summary?.potential_savings || 0;
     const isRebound = app.scheduled_time?.is_rebound_peak;
     const detail = app.detailed_analysis;
-    const reboundData = detail?.rebound_peak_analysis;
+    const reboundData = app.rebound_peak_analysis || detail?.rebound_peak_analysis;  // Check both locations
     const comfortSuggestions = app.comfort_suggestions || [];
     const alternatives = app.comfort_friendly_alternatives || [];
     const bestRec = app.best_time_recommendation;
@@ -267,6 +267,23 @@ function ApplianceCard({ app, index }) {
 
     return (
         <div className={`rounded-2xl border-2 shadow-md overflow-hidden transition-all ${isRebound ? 'border-orange-300' : sc.border}`}>
+            {/* REBOUND PEAK ALERT - Show prominently at top if detected */}
+            {isRebound && reboundData && (
+                <div className="bg-gradient-to-r from-red-600 to-orange-600 px-5 py-3 flex items-center gap-3">
+                    <div className="w-10 h-10 bg-white/20 backdrop-blur-sm rounded-full flex items-center justify-center text-xl">
+                        🛡️
+                    </div>
+                    <div className="flex-1">
+                        <h4 className="text-white font-black text-sm uppercase tracking-wide flex items-center gap-2">
+                            ⚡ REBOUND PEAK DETECTED — {reboundData.severity || reboundData.risk_level || 'MEDIUM'} RISK
+                        </h4>
+                        <p className="text-orange-50 text-xs font-medium mt-0.5">
+                            ⚠️ {reboundData.alert_message || reboundData.why_this_causes_rebound || app.scheduled_time?.rebound_explanation}
+                        </p>
+                    </div>
+                </div>
+            )}
+            
             {/* Header */}
             <div className={`${sc.bg} px-5 py-4 flex items-center justify-between`}>
                 <div className="flex items-center gap-3">
@@ -283,8 +300,8 @@ function ApplianceCard({ app, index }) {
                 <div className="flex flex-col items-end gap-1">
                     <StatusBadge status={app.scheduled_time?.status} />
                     {isRebound && (
-                        <span className="text-[10px] bg-orange-100 text-orange-700 border border-orange-200 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
-                            <RefreshCw size={10} /> Rebound Peak
+                        <span className="text-[10px] bg-red-100 text-red-700 border border-red-300 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                            🔄 {reboundData?.severity || reboundData?.risk_level || 'MEDIUM'} REBOUND
                         </span>
                     )}
                 </div>
@@ -319,6 +336,143 @@ function ApplianceCard({ app, index }) {
                     savings={savings}
                 />
             </div>
+
+            {/* Why Best Time Explanation */}
+            {bestRec?.reason && (
+                <div className="px-5 py-3 bg-blue-50 border-b border-blue-100">
+                    <div className="flex items-start gap-2">
+                        <Info size={14} className="text-blue-600 mt-0.5 flex-shrink-0" />
+                        <div className="flex-1">
+                            <div className="text-xs font-bold text-blue-800 mb-1">Why {fmtHour(bestRec?.hour)} is recommended</div>
+                            <p className="text-xs text-blue-700 leading-relaxed">{bestRec.reason}</p>
+                        </div>
+                    </div>
+                    {/* Show absolute cheapest if different */}
+                    {bestRec.absolute_best_time && (
+                        <div className="mt-2 bg-white/60 rounded-lg p-2 border border-blue-200">
+                            <div className="flex items-center gap-2 text-xs">
+                                <Zap size={12} className="text-amber-500" />
+                                <span className="text-gray-700">
+                                    <span className="font-bold text-amber-700">Cheapest possible:</span>{' '}
+                                    {fmtHour(bestRec.absolute_best_time.hour)} ({bestRec.absolute_best_time.load_category}) — {fmtRupee(bestRec.absolute_best_time.total_cost)}
+                                    {bestRec.absolute_best_time.savings > 0 && (
+                                        <span className="text-emerald-600 font-bold"> (save {fmtRupee(bestRec.absolute_best_time.savings)})</span>
+                                    )}
+                                </span>
+                            </div>
+                            <p className="text-[10px] text-gray-500 mt-1 ml-5">{bestRec.absolute_best_time.note}</p>
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* Quick Rebound Peak Summary (if no detailed explanations) */}
+            {isRebound && reboundData && !detail?.simple_summary && (
+                <div className="px-5 py-4 bg-gradient-to-br from-orange-50 to-red-50 border-b border-orange-200">
+                    
+                    {/* Load Pattern Visualization */}
+                    {reboundData.load_pattern && (
+                        <div className="mb-4">
+                            <div className="flex items-center gap-2 text-center">
+                                <div className="flex-1 bg-white rounded-lg p-3 border border-gray-200">
+                                    <div className="text-[10px] text-gray-500 font-bold uppercase mb-1">Hour Before</div>
+                                    <div className="text-sm font-black text-gray-700">
+                                        {reboundData.load_pattern.hour_before?.time || `${(app.scheduled_time.hour-1)%24}:00`}
+                                    </div>
+                                    <div className="text-xs text-blue-600 font-semibold mt-1">
+                                        {reboundData.load_pattern.hour_before?.load_category || 'moderate'} load
+                                    </div>
+                                </div>
+                                <ArrowRight size={16} className="text-gray-400 flex-shrink-0" />
+                                <div className="flex-1 bg-red-100 rounded-lg p-3 border-2 border-red-400">
+                                    <div className="text-[10px] text-red-600 font-black uppercase mb-1">Your Time ⚡</div>
+                                    <div className="text-base font-black text-red-700">
+                                        {reboundData.load_pattern.your_time?.time || fmtHour(app.scheduled_time.hour)}
+                                    </div>
+                                    <div className="text-xs text-red-700 font-bold mt-1">
+                                        {reboundData.load_pattern.your_time?.load_category || 'moderate'} load
+                                    </div>
+                                </div>
+                                <ArrowRight size={16} className="text-gray-400 flex-shrink-0" />
+                                <div className="flex-1 bg-white rounded-lg p-3 border border-gray-200">
+                                    <div className="text-[10px] text-gray-500 font-bold uppercase mb-1">Hour After</div>
+                                    <div className="text-sm font-black text-gray-700">
+                                        {reboundData.load_pattern.hour_after?.time || `${(app.scheduled_time.hour+1)%24}:00`}
+                                    </div>
+                                    <div className="text-xs text-blue-600 font-semibold mt-1">
+                                        {reboundData.load_pattern.hour_after?.load_category || 'moderate'} load
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Why Rebound Peak Occurs Here */}
+                    <div className="mb-4 bg-blue-50 rounded-lg p-3 border border-blue-200">
+                        <div className="text-xs text-blue-900 font-bold mb-2 flex items-center gap-2">
+                            📘 Why Rebound Peak Occurs Here
+                        </div>
+                        <p className="text-xs text-gray-700 leading-relaxed">
+                            {reboundData.why_rebound_peak_occurs || "Rebound peak occurs when many users shift electricity usage to off-peak hours, creating a new demand spike."}
+                        </p>
+                    </div>
+
+                    {/* How to Avoid Rebound Peak */}
+                    <div className="mb-4 bg-emerald-50 rounded-lg p-3 border border-emerald-200">
+                        <div className="text-xs text-emerald-900 font-bold mb-2 flex items-center gap-2">
+                            ✅ How to Avoid Rebound Peak
+                        </div>
+                        {reboundData.how_to_avoid && (
+                            <ul className="space-y-1.5">
+                                {reboundData.how_to_avoid.map((tip, i) => (
+                                    <li key={i} className="flex items-start gap-2 text-xs text-gray-700">
+                                        <CheckCircle size={12} className="text-emerald-600 mt-0.5 flex-shrink-0" />
+                                        <span>{tip}</span>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+                    </div>
+
+                    {/* Load Reduction Action Plan */}
+                    {reboundData.load_reduction_plan && (
+                        <div className="bg-red-50 rounded-lg p-3 border border-red-200">
+                            <div className="text-xs text-red-900 font-bold mb-2 flex items-center gap-2">
+                                ⚡ Load Reduction Action Plan
+                            </div>
+                            <p className="text-xs text-gray-600 italic mb-3 leading-relaxed">
+                                {reboundData.load_reduction_plan.context}
+                            </p>
+                            <div className="space-y-2">
+                                {reboundData.load_reduction_plan.actions?.map((action, i) => (
+                                    <div key={i} className="bg-white rounded-lg p-3 border border-red-100">
+                                        <div className="flex items-center justify-between mb-1">
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-base">{getApplianceIcon(action.appliance)}</span>
+                                                <span className="text-xs font-bold text-gray-800">{action.appliance}</span>
+                                            </div>
+                                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                                                action.action === 'shift_time' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
+                                            }`}>
+                                                {action.badge}
+                                            </span>
+                                        </div>
+                                        <p className="text-xs text-gray-700 mb-1">{action.suggestion}</p>
+                                        <div className="text-[11px] text-red-600 font-semibold">
+                                            ⚡ {action.impact}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                            <div className="mt-3 bg-emerald-100 rounded-lg p-2 text-center">
+                                <div className="text-xs text-emerald-800 font-bold">
+                                    ✅ {reboundData.load_reduction_plan.total_reduction}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
 
             {/* Simple Summary */}
             {detail?.simple_summary && (
@@ -374,24 +528,36 @@ function ApplianceCard({ app, index }) {
                                 <p className="text-xs text-orange-800 font-semibold mb-3">{reboundData.why_this_causes_rebound}</p>
 
                                 {/* Load Pattern Visual */}
-                                {reboundData.load_pattern && (
+                                {reboundData.load_pattern && (() => {
+                                    // Handle both object format {time, load_category} and string format "14:00 - moderate load"
+                                    const extractLabel = (val) => {
+                                        if (!val) return '—';
+                                        if (typeof val === 'string') return val;
+                                        if (typeof val === 'object') return `${val.time || ''} — ${val.load_category || ''} load`;
+                                        return String(val);
+                                    };
+                                    const hBefore = reboundData.load_pattern.hour_before;
+                                    const hCurrent = reboundData.load_pattern.current_hour || reboundData.load_pattern.your_time;
+                                    const hAfter = reboundData.load_pattern.hour_after;
+                                    return (
                                     <div className="flex items-center gap-2 bg-white rounded-lg p-3 mb-3 border border-orange-100 text-xs text-center">
                                         <div className="flex-1">
                                             <div className="text-gray-400 text-[10px]">Hour Before</div>
-                                            <div className="font-bold text-emerald-700 mt-1">{reboundData.load_pattern.hour_before}</div>
+                                            <div className="font-bold text-emerald-700 mt-1">{extractLabel(hBefore)}</div>
                                         </div>
                                         <ArrowRight size={14} className="text-gray-400 flex-shrink-0" />
                                         <div className="flex-1 bg-red-50 rounded-lg p-2 border border-red-200">
                                             <div className="text-red-500 text-[10px] font-bold">⚡ NOW</div>
-                                            <div className="font-black text-red-700 mt-1">{reboundData.load_pattern.current_hour}</div>
+                                            <div className="font-black text-red-700 mt-1">{extractLabel(hCurrent)}</div>
                                         </div>
                                         <ArrowRight size={14} className="text-gray-400 flex-shrink-0" />
                                         <div className="flex-1">
                                             <div className="text-gray-400 text-[10px]">Hour After</div>
-                                            <div className="font-bold text-gray-700 mt-1">{reboundData.load_pattern.hour_after}</div>
+                                            <div className="font-bold text-gray-700 mt-1">{extractLabel(hAfter)}</div>
                                         </div>
                                     </div>
-                                )}
+                                    );
+                                })()}
 
                                 {/* How to Avoid */}
                                 {reboundData.how_to_avoid && (
@@ -473,32 +639,61 @@ function ApplianceCard({ app, index }) {
                         </div>
                     )}
 
-                    {/* Comfort-Friendly Alternatives */}
-                    {alternatives.length > 0 && (
-                        <div className="px-5 py-4">
-                            <h4 className="text-sm font-bold text-gray-700 mb-3 flex items-center gap-2">
-                                <Star size={15} className="text-violet-600" /> Nearby Comfort-Friendly Times
-                            </h4>
-                            <div className="space-y-2">
-                                {alternatives.map((alt, i) => {
-                                    const ac = statusColor(alt.load_category);
-                                    return (
-                                        <div key={i} className={`flex items-center justify-between rounded-lg p-3 border ${ac.border} ${ac.bg}`}>
-                                            <div className="flex items-center gap-2">
-                                                <Clock size={13} className={ac.text} />
-                                                <span className="text-sm font-bold text-gray-800">{fmtHour(alt.hour)}</span>
-                                                <StatusBadge status={alt.load_category?.toUpperCase()} />
-                                            </div>
-                                            <div className="text-right">
-                                                <div className="text-xs text-gray-500">₹{alt.price_per_kwh?.toFixed(2)}/kWh</div>
-                                                <div className="text-sm font-bold text-gray-800">{fmtRupee(alt.total_cost)}</div>
-                                            </div>
-                                        </div>
-                                    );
-                                })}
-                            </div>
+                    {/* 24-Hour Demand Heatmap */}
+                    <div className="px-5 py-4">
+                        <h4 className="text-sm font-bold text-gray-700 mb-3 flex items-center gap-2">
+                            <Star size={15} className="text-violet-600" /> 24-Hour Demand Map
+                        </h4>
+                        <p className="text-[10px] text-gray-500 mb-2">Tap any hour to see its rate. Your scheduled hour is highlighted.</p>
+                        <div className="grid grid-cols-12 gap-1">
+                            {Array.from({ length: 24 }, (_, h) => {
+                                // Determine load category for this hour using the appliance's wattage
+                                const isScheduled = h === app.scheduled_time?.hour;
+                                const isBest = h === bestRec?.hour;
+                                // Map hour to load category based on our hourly base load model
+                                const hourlyBase = {
+                                    0:0.20,1:0.18,2:0.15,3:0.14,4:0.16,5:0.22,
+                                    6:0.55,7:0.72,8:0.78,9:0.70,
+                                    10:0.52,11:0.48,12:0.50,13:0.47,
+                                    14:0.45,15:0.46,16:0.50,17:0.58,
+                                    18:0.72,19:0.82,20:0.85,21:0.78,
+                                    22:0.55,23:0.35
+                                };
+                                const base = hourlyBase[h] || 0.45;
+                                let cat = 'off-peak', price = 5, color = 'bg-emerald-200 text-emerald-800';
+                                if (base >= 0.7) { cat = 'peak'; price = 10; color = 'bg-red-200 text-red-800'; }
+                                else if (base >= 0.45) { cat = 'moderate'; price = 7; color = 'bg-amber-200 text-amber-800'; }
+
+                                const ampm = h >= 12 ? 'p' : 'a';
+                                const h12 = h % 12 || 12;
+
+                                return (
+                                    <div
+                                        key={h}
+                                        title={`${h12}${ampm} — ${cat} (₹${price}/kWh)`}
+                                        className={`relative rounded-md p-1 text-center text-[10px] font-bold cursor-default transition-all
+                                            ${color}
+                                            ${isScheduled ? 'ring-2 ring-blue-600 ring-offset-1 scale-110 z-10' : ''}
+                                            ${isBest ? 'ring-2 ring-emerald-500 ring-offset-1' : ''}
+                                        `}
+                                    >
+                                        <div>{h12}{ampm}</div>
+                                        <div className="text-[8px] font-medium opacity-70">₹{price}</div>
+                                        {isScheduled && <div className="absolute -top-1 -right-1 w-2 h-2 bg-blue-600 rounded-full"></div>}
+                                        {isBest && !isScheduled && <div className="absolute -top-1 -right-1 w-2 h-2 bg-emerald-500 rounded-full"></div>}
+                                    </div>
+                                );
+                            })}
                         </div>
-                    )}
+                        {/* Legend */}
+                        <div className="flex items-center justify-center gap-4 mt-3 text-[10px] text-gray-500">
+                            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-emerald-200 inline-block"></span> Off-peak ₹5</span>
+                            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-amber-200 inline-block"></span> Moderate ₹7</span>
+                            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-red-200 inline-block"></span> Peak ₹10</span>
+                            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-600 inline-block"></span> Your time</span>
+                            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block"></span> Best time</span>
+                        </div>
+                    </div>
 
                     {/* Comfort Suggestions */}
                     {comfortSuggestions.length > 0 && (
@@ -661,7 +856,7 @@ const Schedule = () => {
                         start_time: parseInt(a.start_time),
                         duration_hours: parseFloat(a.duration_hours)
                     })),
-                    include_explanations: true,
+                    include_explanations: false,  // Speed optimization: skip RAG explanations
                     show_detailed_hours: true
                 })
             });
